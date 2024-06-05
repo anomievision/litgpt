@@ -69,6 +69,7 @@ def setup(
     optimizer: Union[str, Dict] = "AdamW",
     logger_name: Literal["wandb", "tensorboard", "csv"] = "csv",
     seed: int = 1337,
+    validate_prompt: Optional[str] = None,
 ) -> None:
     """Finetune a model using the LoRA method.
 
@@ -94,6 +95,7 @@ def setup(
         optimizer: An optimizer name (such as "AdamW") or config.
         logger_name: The name of the logger to send metrics to.
         seed: The random seed to use for reproducibility.
+        validate_prompt: The prompt to use for validation.
     """
     checkpoint_dir = extend_checkpoint_dir(checkpoint_dir)
     pprint(locals())
@@ -143,7 +145,7 @@ def setup(
         strategy = "auto"
 
     fabric = L.Fabric(devices=devices, strategy=strategy, precision=precision, loggers=logger, plugins=plugins)
-    fabric.launch(main, devices, seed, config, data, checkpoint_dir, out_dir, train, eval, optimizer)
+    fabric.launch(main, devices, seed, config, data, checkpoint_dir, out_dir, train, eval, optimizer, validate_prompt)
 
 
 def main(
@@ -157,6 +159,7 @@ def main(
     train: TrainArgs,
     eval: EvalArgs,
     optimizer: Union[str, Dict],
+    validate_prompt: Optional[str],
 ) -> None:
     validate_args(train, eval)
 
@@ -205,6 +208,7 @@ def main(
         train,
         eval,
         data,
+        validate_prompt,
     )
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
     if fabric.device.type == "cuda":
@@ -241,6 +245,7 @@ def fit(
     train: TrainArgs,
     eval: EvalArgs,
     data: DataModule,
+    validate_prompt: Optional[str],
 ) -> None:
     tokenizer = Tokenizer(checkpoint_dir)
     longest_seq_length, longest_seq_ix = get_longest_seq_length(train_dataloader.dataset)
@@ -322,7 +327,7 @@ def fit(
         if not is_accumulating and step_count % eval.interval == 0:
             t0 = time.perf_counter()
             val_loss = validate(fabric, model, val_dataloader, eval)
-            generate_example(fabric, model, tokenizer, eval, data)
+            generate_example(fabric, model, tokenizer, eval, data, validate_prompt)
             t1 = time.perf_counter() - t0
             fabric.print(f"iter {iter_num}: val loss {val_loss.item():.4f}, val time: {t1 * 1000:.2f} ms")
             metrics = {"val_loss": val_loss, "val_ppl": math.exp(val_loss)}
@@ -359,10 +364,12 @@ def validate(fabric: L.Fabric, model: GPT, val_dataloader: DataLoader, eval: Eva
 
 
 @torch.no_grad()
-def generate_example(fabric: L.Fabric, model: GPT, tokenizer: Tokenizer, eval: EvalArgs, data: DataModule):
-    instruction = "Recommend a movie for me to watch during the weekend and explain the reason."
-    fabric.print(instruction)
-    prompt = data.prompt_style.apply(instruction)
+def generate_example(fabric: L.Fabric, model: GPT, tokenizer: Tokenizer, eval: EvalArgs, data: DataModule, validate_prompt: Optional[str]):
+    if validate_prompt is None:
+        return
+
+    fabric.print(validate_prompt)
+    prompt = data.prompt_style.apply(validate_prompt)
     encoded = tokenizer.encode(prompt, device=fabric.device)
     model.eval()
 
